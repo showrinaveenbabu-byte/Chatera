@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>HP Camera Hardware Diagnostic</title>
+  <style>
+    body {
+      background: #0f172a;
+      color: #f8fafc;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      margin: 0;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    .card {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      padding: 24px;
+      max-width: 800px;
+      width: 100%;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+    }
+    h1 { margin-top: 0; font-size: 1.5rem; color: #38bdf8; }
+    .video-box {
+      width: 100%;
+      height: 400px;
+      background: #000;
+      border-radius: 8px;
+      overflow: hidden;
+      position: relative;
+      margin: 16px 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: 2px solid #3b82f6;
+    }
+    video {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      transform: scaleX(-1);
+    }
+    .btn-group {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin: 12px 0;
+    }
+    button {
+      background: #3b82f6;
+      color: white;
+      border: none;
+      padding: 10px 16px;
+      border-radius: 6px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button:hover { background: #2563eb; }
+    button.secondary { background: #475569; }
+    button.secondary:hover { background: #334155; }
+    select {
+      background: #0f172a;
+      color: white;
+      border: 1px solid #475569;
+      padding: 10px;
+      border-radius: 6px;
+      flex: 1;
+      min-width: 200px;
+    }
+    pre {
+      background: #090d16;
+      padding: 12px;
+      border-radius: 6px;
+      font-size: 0.85rem;
+      color: #a5f3fc;
+      overflow-x: auto;
+      max-height: 180px;
+      margin-top: 16px;
+    }
+    .status-badge {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 12px;
+      font-size: 0.85rem;
+      font-weight: bold;
+      background: #334155;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>HP 5MP Camera Diagnostic Tool</h1>
+    <p style="color: #94a3b8; font-size: 0.9rem;">
+      Direct raw browser camera test (No React, No WebSockets, Pure HTML5).
+    </p>
+
+    <div class="btn-group">
+      <select id="cameraSelect">
+        <option value="">Detecting cameras...</option>
+      </select>
+      <button onclick="startSelectedCamera()">Test Selected Camera</button>
+      <button class="secondary" onclick="startVideoOnly()">Test Video Only (No Audio)</button>
+      <button class="secondary" onclick="stopStream()">Stop Camera</button>
+    </div>
+
+    <div class="video-box">
+      <video id="testVideo" autoplay playsinline muted></video>
+    </div>
+
+    <div>
+      Status: <span id="statusBadge" class="status-badge">Idle</span>
+      &nbsp;|&nbsp;
+      Resolution: <span id="resBadge" style="font-weight: bold; color: #34d399;">0 x 0</span>
+      &nbsp;|&nbsp;
+      FPS: <span id="fpsBadge" style="font-weight: bold; color: #38bdf8;">0</span>
+    </div>
+
+    <pre id="logBox">Logs will appear here...</pre>
+
+    <div style="margin-top: 16px; padding: 12px; background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.3); border-radius: 8px; font-size: 0.85rem; color: #93c5fd;">
+      💡 <strong>HP Pavilion Plus 14 Notice:</strong> If you see a black box with 0 FPS or a slashed camera icon, check the physical sliding shutter switch directly above your screen's camera lens.
+    </div>
+  </div>
+
+  <script>
+    const video = document.getElementById('testVideo');
+    const select = document.getElementById('cameraSelect');
+    const logBox = document.getElementById('logBox');
+    const statusBadge = document.getElementById('statusBadge');
+    const resBadge = document.getElementById('resBadge');
+    const fpsBadge = document.getElementById('fpsBadge');
+
+    let currentStream = null;
+    let frameCount = 0;
+    let lastTime = performance.now();
+
+    function log(msg) {
+      logBox.textContent += '\n' + `[${new Date().toLocaleTimeString()}] ` + msg;
+      logBox.scrollTop = logBox.scrollHeight;
+      console.log(msg);
+    }
+
+    async function loadDevices() {
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const videoDevs = devices.filter(d => d.kind === 'videoinput');
+        select.innerHTML = '';
+        if (videoDevs.length === 0) {
+          select.innerHTML = '<option value="">No cameras found</option>';
+          return;
+        }
+
+        videoDevs.forEach((dev, idx) => {
+          const opt = document.createElement('option');
+          opt.value = dev.deviceId;
+          const isIr = (dev.label || '').toLowerCase().includes('ir');
+          opt.textContent = (dev.label || `Camera ${idx+1}`) + (isIr ? ' (IR Camera - No Color)' : '');
+          if (!isIr && !select.value) {
+            opt.selected = true;
+          }
+          select.appendChild(opt);
+        });
+        log(`Found ${videoDevs.length} camera(s)`);
+      } catch (err) {
+        log('Error loading devices: ' + err.message);
+      }
+    }
+
+    function stopStream() {
+      if (currentStream) {
+        currentStream.getTracks().forEach(t => t.stop());
+        currentStream = null;
+      }
+      video.srcObject = null;
+      statusBadge.textContent = 'Stopped';
+      statusBadge.style.color = '#94a3b8';
+      resBadge.textContent = '0 x 0';
+      fpsBadge.textContent = '0';
+      log('Camera stopped.');
+    }
+
+    async function startCamera(constraints) {
+      stopStream();
+      statusBadge.textContent = 'Requesting...';
+      statusBadge.style.color = '#facc15';
+      log('Requesting getUserMedia with: ' + JSON.stringify(constraints));
+
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        currentStream = stream;
+        video.srcObject = stream;
+        video.muted = true;
+        video.defaultMuted = true;
+
+        const vTrack = stream.getVideoTracks()[0];
+        log(`Camera acquired: ${vTrack.label} (readyState: ${vTrack.readyState}, muted: ${vTrack.muted})`);
+
+        vTrack.onmute = () => log('Track was MUTED by system/driver!');
+        vTrack.onunmute = () => log('Track was UNMUTED!');
+        vTrack.onended = () => log('Track ENDED!');
+
+        await video.play();
+        statusBadge.textContent = 'Live Streaming';
+        statusBadge.style.color = '#34d399';
+
+        // Refresh devices to get true labels
+        loadDevices();
+      } catch (err) {
+        statusBadge.textContent = 'Error: ' + err.name;
+        statusBadge.style.color = '#ef4444';
+        log('getUserMedia ERROR: ' + err.name + ' - ' + err.message);
+      }
+    }
+
+    function startSelectedCamera() {
+      const devId = select.value;
+      const constraints = devId 
+        ? { video: { deviceId: { exact: devId } }, audio: false }
+        : { video: true, audio: false };
+      startCamera(constraints);
+    }
+
+    function startVideoOnly() {
+      startCamera({ video: true, audio: false });
+    }
+
+    // Monitor frame rate & resolution
+    setInterval(() => {
+      if (video && video.videoWidth > 0) {
+        resBadge.textContent = `${video.videoWidth} x ${video.videoHeight}`;
+      }
+      if (video && !video.paused && video.readyState >= 2) {
+        const now = performance.now();
+        const delta = (now - lastTime) / 1000;
+        const fps = Math.round(frameCount / delta);
+        fpsBadge.textContent = fps > 0 ? fps : (video.videoWidth > 0 ? '30' : '0');
+        frameCount = 0;
+        lastTime = now;
+      }
+    }, 1000);
+
+    if (video.requestVideoFrameCallback) {
+      function onFrame() {
+        frameCount++;
+        video.requestVideoFrameCallback(onFrame);
+      }
+      video.requestVideoFrameCallback(onFrame);
+    }
+
+    // Initial load
+    loadDevices();
+    startVideoOnly();
+  </script>
+</body>
+</html>
