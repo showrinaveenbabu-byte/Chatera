@@ -1,56 +1,128 @@
 const User = require('../models/User');
+const mongoose = require('mongoose');
+
+// Helper to escape regex special characters
+function escapeRegex(text) {
+  return text.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&');
+}
 
 exports.getProfile = async (req, res) => {
   try {
+    if (!req.user || !req.user.id || !mongoose.Types.ObjectId.isValid(req.user.id)) {
+      return res.status(401).json({ msg: 'Unauthorized access' });
+    }
+
     const user = await User.findById(req.user.id).select('-password');
+    if (!user) {
+      return res.status(404).json({ msg: 'User not found' });
+    }
+
     res.json(user);
   } catch (err) {
-    console.error(err.message);
-    res.status(500).send('Server Error');
+    console.error('[getProfile Error]:', err.message);
+    res.status(500).json({ msg: 'Unable to load profile. Please try again.' });
   }
 };
 
 exports.updateProfile = async (req, res) => {
   try {
-    const { username, displayName, bio, avatar, status, statusMessage, location, occupation, theme, phoneNumber } = req.body;
-    let user = await User.findById(req.user.id);
+    if (!req.user || !req.user.id || !mongoose.Types.ObjectId.isValid(req.user.id)) {
+      return res.status(401).json({ msg: 'Unauthorized access' });
+    }
 
+    const {
+      username,
+      displayName,
+      bio,
+      avatar,
+      status,
+      statusMessage,
+      location,
+      occupation,
+      theme,
+      phoneNumber
+    } = req.body;
+
+    const user = await User.findById(req.user.id);
     if (!user) {
       return res.status(404).json({ msg: 'User not found' });
     }
 
-    if (username) user.username = username.trim();
+    // Check username uniqueness if changed
+    if (username && username.trim().toLowerCase() !== user.username.toLowerCase()) {
+      const cleanUsername = username.trim().toLowerCase();
+      if (cleanUsername.length < 3) {
+        return res.status(400).json({ msg: 'Username must be at least 3 characters long.' });
+      }
+      const existing = await User.findOne({ username: cleanUsername, _id: { $ne: user._id } });
+      if (existing) {
+        return res.status(400).json({ msg: 'Username is already taken by another user.' });
+      }
+      user.username = cleanUsername;
+    }
+
+    // Check phone uniqueness if changed
+    if (phoneNumber && phoneNumber.trim() !== user.phoneNumber) {
+      const cleanPhone = phoneNumber.trim();
+      const existingPhone = await User.findOne({ phoneNumber: cleanPhone, _id: { $ne: user._id } });
+      if (existingPhone) {
+        return res.status(400).json({ msg: 'Phone number is already registered to another account.' });
+      }
+      user.phoneNumber = cleanPhone;
+    }
+
     if (displayName !== undefined) user.displayName = displayName.trim();
     if (bio !== undefined) user.bio = bio.trim();
     if (avatar !== undefined) user.avatar = avatar;
-    if (status !== undefined) user.status = status;
-    if (statusMessage !== undefined) user.statusMessage = statusMessage.trim();
     if (location !== undefined) user.location = location.trim();
     if (occupation !== undefined) user.occupation = occupation.trim();
-    if (phoneNumber !== undefined) user.phoneNumber = phoneNumber.trim();
-    if (theme !== undefined) user.theme = theme;
+    if (statusMessage !== undefined) user.statusMessage = statusMessage.trim();
+
+    if (status !== undefined) {
+      const validStatuses = ['online', 'offline', 'busy', 'away'];
+      if (validStatuses.includes(status)) {
+        user.status = status;
+      }
+    }
+
+    if (theme !== undefined) {
+      const validThemes = ['dark', 'light'];
+      if (validThemes.includes(theme)) {
+        user.theme = theme;
+      }
+    }
 
     await user.save();
-    res.json(user);
+    const updatedUser = await User.findById(user._id).select('-password');
+    res.json(updatedUser);
   } catch (err) {
-    console.error('Error updating profile:', err.message);
-    res.status(500).send('Server Error');
+    if (err.code === 11000) {
+      const field = Object.keys(err.keyValue || {})[0] || 'Field';
+      return res.status(400).json({ msg: `This ${field} is already in use by another user.` });
+    }
+    console.error('[updateProfile Error]:', err.message);
+    res.status(500).json({ msg: 'Unable to update profile. Please try again.' });
   }
 };
 
 exports.searchUsers = async (req, res) => {
   try {
     const { query } = req.query;
-    const currentUserId = req.user.id;
+    const currentUserId = req.user?.id;
 
-    let filter = { _id: { $ne: currentUserId } };
+    if (!currentUserId || !mongoose.Types.ObjectId.isValid(currentUserId)) {
+      return res.status(401).json({ msg: 'Unauthorized access' });
+    }
+
+    let filter = { _id: { $ne: new mongoose.Types.ObjectId(currentUserId) } };
 
     if (query && query.trim()) {
-      const q = query.trim();
+      const safeQuery = escapeRegex(query.trim());
       filter.$or = [
-        { username: { $regex: q, $options: 'i' } },
-        { email: { $regex: q, $options: 'i' } },
-        { phoneNumber: { $regex: q, $options: 'i' } }
+        { username: { $regex: safeQuery, $options: 'i' } },
+        { displayName: { $regex: safeQuery, $options: 'i' } },
+        { email: { $regex: safeQuery, $options: 'i' } },
+        { phoneNumber: { $regex: safeQuery, $options: 'i' } }
       ];
     }
 
@@ -68,16 +140,19 @@ exports.searchUsers = async (req, res) => {
 
     res.json(enrichedUsers);
   } catch (err) {
-    console.error('Error searching users:', err.message);
-    res.status(500).send('Server Error');
+    console.error('[searchUsers Error]:', err.message);
+    res.status(500).json({ msg: 'Unable to search users. Please try again.' });
   }
 };
 
 exports.discoverUsers = async (req, res) => {
   try {
-    const currentUserId = req.user.id;
-    // Return all other users on the platform up to 50
-    const users = await User.find({ _id: { $ne: currentUserId } })
+    const currentUserId = req.user?.id;
+    if (!currentUserId || !mongoose.Types.ObjectId.isValid(currentUserId)) {
+      return res.status(401).json({ msg: 'Unauthorized access' });
+    }
+
+    const users = await User.find({ _id: { $ne: new mongoose.Types.ObjectId(currentUserId) } })
       .select('-password')
       .sort({ createdAt: -1 })
       .limit(50);
@@ -94,7 +169,7 @@ exports.discoverUsers = async (req, res) => {
 
     res.json(enrichedUsers);
   } catch (err) {
-    console.error('Error discovering users:', err.message);
-    res.status(500).send('Server Error');
+    console.error('[discoverUsers Error]:', err.message);
+    res.status(500).json({ msg: 'Unable to discover users. Please try again.' });
   }
 };

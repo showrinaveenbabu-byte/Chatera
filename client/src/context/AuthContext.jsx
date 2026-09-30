@@ -1,5 +1,5 @@
-import React, { createContext, useState, useEffect } from 'react';
-import axios from 'axios';
+import React, { createContext, useState, useEffect, useCallback } from 'react';
+import api, { getErrorMessage } from '../utils/api';
 
 export const AuthContext = createContext();
 
@@ -7,7 +7,22 @@ export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
 
+  const logout = useCallback(() => {
+    localStorage.removeItem('token');
+    localStorage.removeItem('username');
+    localStorage.removeItem('id');
+    localStorage.removeItem('email');
+    localStorage.removeItem('phoneNumber');
+    localStorage.removeItem('avatar');
+    localStorage.removeItem('displayName');
+    localStorage.removeItem('status');
+    localStorage.removeItem('theme');
+    document.body.classList.remove('light-theme');
+    setUser(null);
+  }, []);
+
   useEffect(() => {
+    // Check local storage for existing session
     const token = localStorage.getItem('token');
     const username = localStorage.getItem('username');
     const id = localStorage.getItem('id');
@@ -39,13 +54,25 @@ export const AuthProvider = ({ children }) => {
       }
     }
     setLoading(false);
-  }, []);
+
+    // Listen for unauthorized 401 events from the api interceptor
+    const handleUnauthorized = () => {
+      logout();
+    };
+
+    window.addEventListener('chatera:unauthorized', handleUnauthorized);
+    return () => {
+      window.removeEventListener('chatera:unauthorized', handleUnauthorized);
+    };
+  }, [logout]);
 
   const login = async (username, password) => {
     try {
-      const res = await axios.post('http://localhost:5000/api/auth/login', { username, password });
+      const res = await api.post('/api/auth/login', { username, password });
       const u = res.data.user;
-      localStorage.setItem('token', res.data.token);
+      const token = res.data.token;
+
+      localStorage.setItem('token', token);
       localStorage.setItem('username', u.username);
       localStorage.setItem('id', u.id);
       localStorage.setItem('email', u.email || '');
@@ -56,7 +83,7 @@ export const AuthProvider = ({ children }) => {
       localStorage.setItem('theme', u.theme || 'dark');
 
       setUser({ 
-        token: res.data.token, 
+        token, 
         username: u.username, 
         id: u.id, 
         email: u.email, 
@@ -74,13 +101,13 @@ export const AuthProvider = ({ children }) => {
       }
       return { success: true };
     } catch (err) {
-      return { success: false, message: err.response?.data?.msg || 'Login failed' };
+      return { success: false, message: getErrorMessage(err, 'Login failed. Please check your credentials.') };
     }
   };
 
   const register = async (username, email, phoneNumber, password, displayName = '', avatar = '') => {
     try {
-      const res = await axios.post('http://localhost:5000/api/auth/register', { 
+      const res = await api.post('/api/auth/register', { 
         username, 
         email, 
         phoneNumber, 
@@ -89,7 +116,9 @@ export const AuthProvider = ({ children }) => {
         avatar 
       });
       const u = res.data.user;
-      localStorage.setItem('token', res.data.token);
+      const token = res.data.token;
+
+      localStorage.setItem('token', token);
       localStorage.setItem('username', u.username);
       localStorage.setItem('id', u.id);
       localStorage.setItem('email', u.email || '');
@@ -100,7 +129,7 @@ export const AuthProvider = ({ children }) => {
       localStorage.setItem('theme', u.theme || 'dark');
 
       setUser({ 
-        token: res.data.token, 
+        token, 
         username: u.username, 
         id: u.id, 
         email: u.email, 
@@ -110,22 +139,11 @@ export const AuthProvider = ({ children }) => {
         status: u.status || 'online',
         theme: u.theme || 'dark' 
       });
+
       return { success: true };
     } catch (err) {
-      return { success: false, message: err.response?.data?.msg || 'Registration failed' };
+      return { success: false, message: getErrorMessage(err, 'Registration failed. Please try again.') };
     }
-  };
-
-  const logout = () => {
-    localStorage.removeItem('token');
-    localStorage.removeItem('username');
-    localStorage.removeItem('id');
-    localStorage.removeItem('email');
-    localStorage.removeItem('phoneNumber');
-    localStorage.removeItem('avatar');
-    localStorage.removeItem('theme');
-    document.body.classList.remove('light-theme');
-    setUser(null);
   };
 
   const updateUser = (newUserData) => {

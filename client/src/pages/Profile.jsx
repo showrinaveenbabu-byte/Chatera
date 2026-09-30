@@ -1,6 +1,6 @@
 import React, { useContext, useState, useEffect, useRef } from 'react';
 import { AuthContext } from '../context/AuthContext';
-import axios from 'axios';
+import api, { getErrorMessage } from '../utils/api';
 import { 
   User as UserIcon, 
   Mail, 
@@ -97,9 +97,7 @@ const Profile = () => {
   const fetchProfile = async () => {
     try {
       setLoading(true);
-      const res = await axios.get('http://localhost:5000/api/users/profile', {
-        headers: { 'x-auth-token': user?.token }
-      });
+      const res = await api.get('/api/users/profile');
       const data = res.data;
       setProfile(data);
       setFormData({
@@ -253,9 +251,7 @@ const Profile = () => {
     e.preventDefault();
     setSaving(true);
     try {
-      const res = await axios.put('http://localhost:5000/api/users/profile', formData, {
-        headers: { 'x-auth-token': user?.token }
-      });
+      const res = await api.put('/api/users/profile', formData);
       
       const updatedUser = res.data;
       setProfile(updatedUser);
@@ -273,7 +269,7 @@ const Profile = () => {
       showToast('Profile updated successfully!');
     } catch (err) {
       console.error('Error saving profile:', err);
-      showToast(err.response?.data?.msg || 'Failed to update profile. Please try again.');
+      showToast(getErrorMessage(err, 'Failed to update profile. Please try again.'));
     } finally {
       setSaving(false);
     }
@@ -363,15 +359,13 @@ const Profile = () => {
     if (!editMode) {
       try {
         setSaving(true);
-        const res = await axios.put('http://localhost:5000/api/users/profile', { avatar: tempAvatar }, {
-          headers: { 'x-auth-token': user?.token }
-        });
+        const res = await api.put('/api/users/profile', { avatar: tempAvatar });
         setProfile(res.data);
         updateUser({ avatar: tempAvatar });
         showToast('Profile picture updated successfully!');
       } catch (err) {
         console.error('Error saving avatar:', err);
-        showToast('Error saving avatar to server.');
+        showToast(getErrorMessage(err, 'Error saving avatar to server.'));
       } finally {
         setSaving(false);
       }

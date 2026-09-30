@@ -1,13 +1,10 @@
-const express = require('express');
-const mongoose = require('mongoose');
-const cors = require('cors');
-const dotenv = require('dotenv');
 const http = require('http');
 const { Server } = require('socket.io');
+const mongoose = require('mongoose');
+const app = require('./app');
+const { connectDB } = require('./config/db');
+const Message = require('./models/Message');
 
-dotenv.config({ path: __dirname + '/.env' });
-
-const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
@@ -16,45 +13,25 @@ const io = new Server(server, {
   }
 });
 
-app.use(cors());
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ limit: '50mb', extended: true }));
-// Routes
-app.use('/api/auth', require('./routes/authRoutes'));
-app.use('/api/users', require('./routes/userRoutes'));
-app.use('/api/friends', require('./routes/friendRoutes'));
-app.use('/api/messages', require('./routes/messageRoutes'));
-
-// Database connection
-const MONGO_URI = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/communication_app';
-mongoose.connect(MONGO_URI)
-  .then((conn) => console.log(`MongoDB connected successfully: ${conn.connection.host}/${conn.connection.name}`))
-  .catch(err => {
-    console.error('MongoDB connection error:', err.message);
-    console.error('Make sure MongoDB service is running locally or check your MONGO_URI in .env');
-  });
+// Expose io instance to Express routes
+app.set('io', io);
 
 const users = {}; // Room tracking
 const socketToRoom = {}; // Socket to Room mapping
 const userSockets = {}; // Map user IDs to socket IDs
 
-// Models for DB storage
-const Message = require('./models/Message');
-
-// Socket.io connection for signaling
+// Socket.io connection for signaling & real-time messaging
 io.on('connection', (socket) => {
-  console.log('New user connected:', socket.id);
+  console.log('[Socket] New user connected:', socket.id);
 
   // Register user socket & join personal room for multi-device/multi-tab delivery
   socket.on('register-user', (userId) => {
     if (!userId) return;
     const uid = (typeof userId === 'object' && userId._id ? userId._id : userId).toString().trim();
     socket.userId = uid;
-    
-    // Join private user room (handles multiple tabs, reloads, and reconnects effortlessly)
+
     socket.join(`user_${uid}`);
 
-    // Also track in userSockets map (using a Set for multiple active sockets)
     if (!userSockets[uid]) {
       userSockets[uid] = new Set();
     }
@@ -63,9 +40,10 @@ io.on('connection', (socket) => {
   });
 
   socket.on('join-room', (roomId, userId) => {
+    if (!roomId) return;
     if (users[roomId]) {
       const length = users[roomId].length;
-      if (length === 10) { // Limit to 10 users per room
+      if (length >= 10) { // Limit to 10 users per room
         socket.emit('room-full');
         return;
       }
@@ -74,19 +52,28 @@ io.on('connection', (socket) => {
       users[roomId] = [socket.id];
     }
     socketToRoom[socket.id] = roomId;
-    
+
     socket.join(roomId);
     const usersInThisRoom = users[roomId].filter(id => id !== socket.id);
-
     socket.emit('all-users', usersInThisRoom);
   });
 
-  socket.on('sending-signal', payload => {
-    io.to(payload.userToSignal).emit('user-joined', { signal: payload.signal, callerID: payload.callerID });
+  socket.on('sending-signal', (payload) => {
+    if (payload && payload.userToSignal) {
+      io.to(payload.userToSignal).emit('user-joined', {
+        signal: payload.signal,
+        callerID: payload.callerID
+      });
+    }
   });
 
-  socket.on('returning-signal', payload => {
-    io.to(payload.callerID).emit('receiving-returned-signal', { signal: payload.signal, id: socket.id });
+  socket.on('returning-signal', (payload) => {
+    if (payload && payload.callerID) {
+      io.to(payload.callerID).emit('receiving-returned-signal', {
+        signal: payload.signal,
+        id: socket.id
+      });
+    }
   });
 
   // Direct Messaging: Instant Socket Delivery + Asynchronous DB Persistence
@@ -128,11 +115,11 @@ io.on('connection', (socket) => {
       // 1. Instantly broadcast to receiver's personal room (all active sockets/tabs)
       io.to(`user_${receiverId}`).emit('receive-direct-message', msgPayload);
 
-      // 2. Deliver confirmation back to sender's personal room (all active sockets/tabs)
+      // 2. Deliver confirmation back to sender's personal room
       io.to(`user_${senderId}`).emit('message-sent', msgPayload);
       socket.emit('message-sent', msgPayload);
 
-      // 3. Persist to MongoDB asynchronously without blocking real-time socket delivery
+      // 3. Persist to MongoDB asynchronously
       try {
         const sObjId = mongoose.Types.ObjectId.isValid(senderId) ? new mongoose.Types.ObjectId(senderId) : null;
         const rObjId = mongoose.Types.ObjectId.isValid(receiverId) ? new mongoose.Types.ObjectId(receiverId) : null;
@@ -158,13 +145,15 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Chat/Messaging in Room (WebRTC Room)
+  // Chat/Messaging in WebRTC Room
   socket.on('send-message', (roomId, messageData) => {
-    socket.to(roomId).emit('receive-message', messageData);
+    if (roomId) {
+      socket.to(roomId).emit('receive-message', messageData);
+    }
   });
 
   socket.on('disconnect', () => {
-    console.log('User disconnected:', socket.id);
+    console.log('[Socket] User disconnected:', socket.id);
     if (socket.userId && userSockets[socket.userId]) {
       userSockets[socket.userId].delete(socket.id);
       if (userSockets[socket.userId].size === 0) {
@@ -179,12 +168,26 @@ io.on('connection', (socket) => {
       if (room.length === 0) {
         delete users[roomId];
       }
+      socket.to(roomId).emit('user-disconnected', socket.id);
     }
-    socket.to(roomId).emit('user-disconnected', socket.id);
+    delete socketToRoom[socket.id];
   });
 });
 
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+
+// Connect DB then start server
+connectDB()
+  .then(() => {
+    server.listen(PORT, () => {
+      console.log(`[Server] Communication app backend running on port ${PORT}`);
+    });
+  })
+  .catch((err) => {
+    console.error('[Server Startup Warning] MongoDB connection failed:', err.message);
+    server.listen(PORT, () => {
+      console.log(`[Server] Server listening on port ${PORT} (Database pending connection)`);
+    });
+  });
+
+module.exports = server;

@@ -4,6 +4,7 @@ import io from 'socket.io-client';
 import Peer from 'simple-peer/simplepeer.min.js';
 import { AuthContext } from '../context/AuthContext';
 import VideoPlayer from '../components/VideoPlayer';
+import { SOCKET_SERVER_URL } from '../utils/api';
 import {
   MonitorUp,
   MessageSquare,
@@ -102,7 +103,7 @@ const Room = () => {
   // Main lifecycle: runs ONCE when entering the room
   useEffect(() => {
     let isCancelled = false;
-    socketRef.current = io('http://localhost:5000');
+    socketRef.current = io(SOCKET_SERVER_URL, { transports: ['websocket', 'polling'] });
     const currentUserId = user?.id || user?._id || 'guest-' + Math.random().toString(36).slice(2);
 
     const setupMediaAndJoin = async () => {

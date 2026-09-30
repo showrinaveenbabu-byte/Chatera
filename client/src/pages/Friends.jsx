@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useContext } from 'react';
-import axios from 'axios';
 import { AuthContext } from '../context/AuthContext';
-import { Users, UserPlus, Check, X, Search, Phone, Mail, MessageSquare, Sparkles } from 'lucide-react';
+import api, { getErrorMessage } from '../utils/api';
+import { Users, UserPlus, Check, X, Search, Phone, Mail, MessageSquare, Sparkles, UserMinus } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 
 const UserAvatar = ({ userObj, size = '42px', gradient = 'linear-gradient(135deg, #3b82f6, #8b5cf6)' }) => {
@@ -36,90 +36,118 @@ const Friends = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
   const [sentRequests, setSentRequests] = useState({});
+  const [loadingFriends, setLoadingFriends] = useState(true);
+  const [toastMessage, setToastMessage] = useState('');
+
+  const currentUserId = (user?.id || user?._id)?.toString();
+
+  const showToast = (msg) => {
+    setToastMessage(msg);
+    setTimeout(() => setToastMessage(''), 3500);
+  };
 
   const fetchFriendsData = async () => {
     try {
-      const res = await axios.get('http://localhost:5000/api/friends', {
-        headers: { 'x-auth-token': user.token }
-      });
+      setLoadingFriends(true);
+      const res = await api.get('/api/friends');
       setFriends(res.data.friends || []);
       setRequests(res.data.requests || []);
     } catch (err) {
-      console.error(err);
+      console.error('Error fetching friends:', err);
+    } finally {
+      setLoadingFriends(false);
     }
   };
 
   const fetchDiscoverUsers = async () => {
     try {
-      const res = await axios.get('http://localhost:5000/api/users/search?query=', {
-        headers: { 'x-auth-token': user.token }
-      });
-      setDiscoverUsers((res.data || []).filter(u => u._id !== user.id));
+      const res = await api.get('/api/users/discover');
+      setDiscoverUsers((res.data || []).filter(u => (u._id || u.id)?.toString() !== currentUserId));
     } catch (err) {
-      console.error(err);
+      console.error('Error fetching discover users:', err);
     }
   };
 
   useEffect(() => {
-    fetchFriendsData();
-    fetchDiscoverUsers();
-  }, [user.token]);
+    if (user?.token) {
+      fetchFriendsData();
+      fetchDiscoverUsers();
+    }
+  }, [user?.token, currentUserId]);
 
-  // Live search as user types
+  // Live search as user types with debounce
   useEffect(() => {
     const q = searchQuery.trim();
     if (q.length > 0) {
       const timer = setTimeout(async () => {
         try {
-          const res = await axios.get(`http://localhost:5000/api/users/search?query=${encodeURIComponent(q)}`, {
-            headers: { 'x-auth-token': user.token }
-          });
-          setSearchResults((res.data || []).filter(u => u._id !== user.id));
+          const res = await api.get(`/api/users/search?query=${encodeURIComponent(q)}`);
+          setSearchResults((res.data || []).filter(u => (u._id || u.id)?.toString() !== currentUserId));
         } catch (err) {
-          console.error(err);
+          console.error('Search error:', err);
         }
-      }, 200);
+      }, 250);
       return () => clearTimeout(timer);
     } else {
       setSearchResults([]);
     }
-  }, [searchQuery, user.token, user.id]);
+  }, [searchQuery, currentUserId]);
 
   const handleSearch = async (e) => {
     e.preventDefault();
     const q = searchQuery.trim();
     if (q.length > 0) {
       try {
-        const res = await axios.get(`http://localhost:5000/api/users/search?query=${encodeURIComponent(q)}`, {
-          headers: { 'x-auth-token': user.token }
-        });
-        setSearchResults((res.data || []).filter(u => u._id !== user.id));
+        const res = await api.get(`/api/users/search?query=${encodeURIComponent(q)}`);
+        setSearchResults((res.data || []).filter(u => (u._id || u.id)?.toString() !== currentUserId));
       } catch (err) {
-        console.error(err);
+        console.error('Search error:', err);
       }
     }
   };
 
   const sendRequest = async (userId) => {
     try {
-      await axios.post('http://localhost:5000/api/friends/request', { userId }, {
-        headers: { 'x-auth-token': user.token }
-      });
+      await api.post('/api/friends/request', { userId });
       setSentRequests(prev => ({ ...prev, [userId]: true }));
+      showToast('Friend request sent!');
     } catch (err) {
+      const msg = getErrorMessage(err, 'Request already sent');
       setSentRequests(prev => ({ ...prev, [userId]: true }));
+      showToast(msg);
     }
   };
 
   const acceptRequest = async (userId) => {
     try {
-      await axios.post('http://localhost:5000/api/friends/accept', { userId }, {
-        headers: { 'x-auth-token': user.token }
-      });
+      await api.post('/api/friends/accept', { userId });
+      showToast('Friend request accepted!');
       fetchFriendsData();
       fetchDiscoverUsers();
     } catch (err) {
-      console.error(err);
+      showToast(getErrorMessage(err, 'Unable to accept request.'));
+    }
+  };
+
+  const declineRequest = async (userId) => {
+    try {
+      await api.post('/api/friends/reject', { userId });
+      showToast('Friend request declined.');
+      fetchFriendsData();
+    } catch (err) {
+      showToast(getErrorMessage(err, 'Unable to decline request.'));
+    }
+  };
+
+  const removeFriend = async (friendId) => {
+    if (!window.confirm('Are you sure you want to remove this friend?')) return;
+    try {
+      await api.delete(`/api/friends/${friendId}`);
+      showToast('Friend removed.');
+      fetchFriendsData();
+      fetchDiscoverUsers();
+    } catch (err) {
+      showToast(getErrorMessage(err, 'Unable to remove friend.'));
     }
   };
 
@@ -127,7 +155,7 @@ const Friends = () => {
     navigate(`/chats?user=${friendId}`);
   };
 
-  const isFriend = (id) => friends.some(f => f._id === id);
+  const isFriend = (id) => friends.some(f => (f._id || f.id)?.toString() === id?.toString());
 
   const displayedUsers = searchQuery.trim() ? searchResults : discoverUsers;
 
@@ -136,6 +164,26 @@ const Friends = () => {
       <h1 style={{ fontSize: '2rem', display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '2rem' }}>
         <Users size={30} style={{ color: 'var(--primary-color)' }} /> Friends & Community
       </h1>
+
+      {toastMessage && (
+        <div
+          style={{
+            position: 'fixed',
+            bottom: '2rem',
+            right: '2rem',
+            zIndex: 9999,
+            backgroundColor: 'var(--primary-color)',
+            color: 'white',
+            padding: '0.75rem 1.25rem',
+            borderRadius: '10px',
+            boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
+            fontSize: '0.9rem',
+            animation: 'fadeIn 0.2s ease-in'
+          }}
+        >
+          {toastMessage}
+        </div>
+      )}
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(350px, 1fr))', gap: '2rem' }}>
         
@@ -149,17 +197,22 @@ const Friends = () => {
                 Friend Requests ({requests.length})
               </h2>
               {requests.map(req => (
-                <div key={req._id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.85rem', border: '1px solid var(--border-color)', borderRadius: '10px', marginBottom: '0.6rem' }}>
+                <div key={req._id || req.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.85rem', border: '1px solid var(--border-color)', borderRadius: '10px', marginBottom: '0.6rem' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '0.85rem' }}>
                     <UserAvatar userObj={req} size="42px" gradient="linear-gradient(135deg, #3b82f6, #8b5cf6)" />
                     <div>
-                      <h4 style={{ margin: 0, fontSize: '0.95rem' }}>{req.username}</h4>
+                      <h4 style={{ margin: 0, fontSize: '0.95rem' }}>{req.displayName || req.username}</h4>
                       <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{req.email}</div>
                     </div>
                   </div>
-                  <button onClick={() => acceptRequest(req._id)} className="btn btn-primary" style={{ padding: '0.4rem 0.85rem', fontSize: '0.8rem', display: 'flex', gap: '0.3rem', alignItems: 'center' }}>
-                    <Check size={16} /> Accept
-                  </button>
+                  <div style={{ display: 'flex', gap: '0.4rem' }}>
+                    <button onClick={() => acceptRequest(req._id || req.id)} className="btn btn-primary" style={{ padding: '0.4rem 0.75rem', fontSize: '0.8rem', display: 'flex', gap: '0.3rem', alignItems: 'center' }}>
+                      <Check size={15} /> Accept
+                    </button>
+                    <button onClick={() => declineRequest(req._id || req.id)} className="btn btn-outline" style={{ padding: '0.4rem 0.65rem', fontSize: '0.8rem' }} title="Decline">
+                      <X size={15} />
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>
@@ -168,26 +221,33 @@ const Friends = () => {
           {/* My Friends */}
           <div className="glass-panel" style={{ padding: '1.75rem' }}>
             <h2 style={{ marginBottom: '1.25rem', fontSize: '1.25rem' }}>My Friends ({friends.length})</h2>
-            {friends.length === 0 ? (
+            {loadingFriends ? (
+              <div style={{ textAlign: 'center', padding: '1.5rem', color: 'var(--text-secondary)' }}>Loading friends...</div>
+            ) : friends.length === 0 ? (
               <div style={{ textAlign: 'center', padding: '1.5rem 0', color: 'var(--text-secondary)' }}>
                 <p style={{ margin: '0 0 0.5rem 0' }}>You haven't added any friends yet.</p>
-                <span style={{ fontSize: '0.8rem' }}>Check out the suggested people on the right to connect!</span>
+                <span style={{ fontSize: '0.8rem' }}>Check out the community members on the right to connect!</span>
               </div>
             ) : (
               friends.map(friend => (
-                <div key={friend._id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.85rem', borderBottom: '1px solid var(--border-color)' }}>
+                <div key={friend._id || friend.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.85rem', borderBottom: '1px solid var(--border-color)' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '0.85rem' }}>
                     <UserAvatar userObj={friend} size="44px" gradient="linear-gradient(135deg, #10b981, #3b82f6)" />
                     <div>
-                      <h4 style={{ margin: 0, fontSize: '0.95rem' }}>{friend.username}</h4>
+                      <h4 style={{ margin: 0, fontSize: '0.95rem' }}>{friend.displayName || friend.username}</h4>
                       <div style={{ fontSize: '0.75rem', color: friend.status === 'online' ? 'var(--success)' : 'var(--text-secondary)' }}>
                         {friend.status === 'online' ? '🟢 Online' : '⚪ Offline'}
                       </div>
                     </div>
                   </div>
-                  <button onClick={() => startChat(friend._id)} className="btn btn-outline" style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.4rem 0.85rem', fontSize: '0.85rem' }}>
-                    <MessageSquare size={15} /> Chat
-                  </button>
+                  <div style={{ display: 'flex', gap: '0.5rem' }}>
+                    <button onClick={() => startChat(friend._id || friend.id)} className="btn btn-outline" style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.4rem 0.85rem', fontSize: '0.85rem' }}>
+                      <MessageSquare size={15} /> Chat
+                    </button>
+                    <button onClick={() => removeFriend(friend._id || friend.id)} className="btn btn-outline" style={{ padding: '0.4rem 0.65rem' }} title="Remove Friend">
+                      <UserMinus size={15} style={{ color: '#ef4444' }} />
+                    </button>
+                  </div>
                 </div>
               ))
             )}
@@ -233,16 +293,17 @@ const Friends = () => {
               </div>
             ) : (
               displayedUsers.map(targetUser => {
-                const alreadyFriend = isFriend(targetUser._id);
-                const reqSent = sentRequests[targetUser._id];
+                const targetId = (targetUser._id || targetUser.id)?.toString();
+                const alreadyFriend = isFriend(targetId);
+                const reqSent = sentRequests[targetId];
 
                 return (
-                  <div key={targetUser._id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.85rem 1rem', border: '1px solid var(--border-color)', borderRadius: '10px', backgroundColor: 'rgba(15, 23, 42, 0.4)' }}>
+                  <div key={targetId} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.85rem 1rem', border: '1px solid var(--border-color)', borderRadius: '10px', backgroundColor: 'rgba(15, 23, 42, 0.4)' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.85rem' }}>
                       <UserAvatar userObj={targetUser} size="42px" gradient="linear-gradient(135deg, #8b5cf6, #3b82f6)" />
                       <div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                          <h4 style={{ margin: 0, fontSize: '0.925rem' }}>{targetUser.username}</h4>
+                          <h4 style={{ margin: 0, fontSize: '0.925rem' }}>{targetUser.displayName || targetUser.username}</h4>
                           {alreadyFriend && <span className="badge badge-success" style={{ fontSize: '0.65rem' }}>Friend</span>}
                         </div>
                         <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', display: 'flex', gap: '0.75rem', marginTop: '0.2rem' }}>
@@ -253,13 +314,13 @@ const Friends = () => {
                     </div>
 
                     <div style={{ display: 'flex', gap: '0.5rem' }}>
-                      <button onClick={() => startChat(targetUser._id)} className="btn btn-outline" style={{ padding: '0.4rem 0.65rem', fontSize: '0.75rem' }} title="Send Message">
+                      <button onClick={() => startChat(targetId)} className="btn btn-outline" style={{ padding: '0.4rem 0.65rem', fontSize: '0.75rem' }} title="Send Message">
                         <MessageSquare size={14} />
                       </button>
 
                       {!alreadyFriend && (
                         <button
-                          onClick={() => sendRequest(targetUser._id)}
+                          onClick={() => sendRequest(targetId)}
                           className="btn btn-primary"
                           style={{
                             padding: '0.4rem 0.65rem',

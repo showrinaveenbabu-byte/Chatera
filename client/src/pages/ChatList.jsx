@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useContext, useRef } from 'react';
-import axios from 'axios';
+import api, { getErrorMessage } from '../utils/api';
 import { AuthContext } from '../context/AuthContext';
 import {
   Search,
@@ -19,6 +19,7 @@ import {
   X,
   Compass,
   UserCheck,
+  Trash2,
 } from 'lucide-react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { useSocket } from '../context/SocketContext';
@@ -171,12 +172,18 @@ const ChatList = () => {
       }
     };
 
+    const handleMessageDeleted = ({ messageId }) => {
+      setMessages((prev) => prev.filter((m) => m._id !== messageId));
+    };
+
     socket.on('receive-direct-message', handleReceiveDirectMessage);
     socket.on('message-sent', handleMessageSent);
+    socket.on('message-deleted', handleMessageDeleted);
 
     return () => {
       socket.off('receive-direct-message', handleReceiveDirectMessage);
       socket.off('message-sent', handleMessageSent);
+      socket.off('message-deleted', handleMessageDeleted);
     };
   }, [socket, currentUserId, discoverUsers, friends, recentStorageKey]);
 
@@ -188,8 +195,8 @@ const ChatList = () => {
     setRecentChats(loadRecentChats());
 
     // Fetch conversation history directly from MongoDB
-    axios
-      .get('http://localhost:5000/api/messages/conversations', { headers: { 'x-auth-token': user.token } })
+    api
+      .get('/api/messages/conversations')
       .then((res) => {
         if (Array.isArray(res.data) && res.data.length > 0) {
           setRecentChats((prevLocal) => {
@@ -210,16 +217,16 @@ const ChatList = () => {
       .catch((err) => console.log('[ChatList] Could not fetch server conversations:', err.message));
 
     // Fetch accepted friends
-    axios
-      .get('http://localhost:5000/api/friends', { headers: { 'x-auth-token': user.token } })
+    api
+      .get('/api/friends')
       .then((res) => {
         setFriends(res.data.friends || []);
       })
       .catch(console.error);
 
     // Fetch all discoverable/unknown users on the platform
-    axios
-      .get('http://localhost:5000/api/users/search?query=', { headers: { 'x-auth-token': user.token } })
+    api
+      .get('/api/users/discover')
       .then((res) => {
         const others = (res.data || []).filter((u) => u._id !== currentUserId);
         setDiscoverUsers(others);
@@ -233,10 +240,8 @@ const ChatList = () => {
     if (trimmed.length > 0) {
       setIsSearching(true);
       const delayTimer = setTimeout(() => {
-        axios
-          .get(`http://localhost:5000/api/users/search?query=${encodeURIComponent(trimmed)}`, {
-            headers: { 'x-auth-token': user.token },
-          })
+        api
+          .get(`/api/users/search?query=${encodeURIComponent(trimmed)}`)
           .then((res) => {
             const matches = (res.data || []).filter((u) => u._id !== user.id);
             setSearchResults(matches);
@@ -266,10 +271,8 @@ const ChatList = () => {
         selectChat(match);
       } else {
         // Fetch specific user profile
-        axios
-          .get(`http://localhost:5000/api/users/search?query=${targetId}`, {
-            headers: { 'x-auth-token': user.token },
-          })
+        api
+          .get(`/api/users/search?query=${encodeURIComponent(targetId)}`)
           .then((res) => {
             const found = res.data?.find((u) => u._id === targetId);
             if (found) selectChat(found);
@@ -297,9 +300,7 @@ const ChatList = () => {
 
     try {
       const partnerId = (targetUser._id || targetUser.id)?.toString();
-      const res = await axios.get(`http://localhost:5000/api/messages/${partnerId}`, {
-        headers: { 'x-auth-token': user.token },
-      });
+      const res = await api.get(`/api/messages/${partnerId}`);
       setMessages(res.data || []);
       setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 80);
     } catch (err) {
@@ -308,7 +309,7 @@ const ChatList = () => {
     }
   };
 
-  // Send a message (works seamlessly with unknown users and friends)
+  // Send a message (works seamlessly with unknown users and friends, with REST fallback)
   const handleSendMessage = (e, type = 'text', content = null) => {
     e?.preventDefault();
     const textToSend = content || messageInput;
@@ -337,9 +338,9 @@ const ChatList = () => {
       setMessages((prev) => [...prev, msgData]);
       setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 50);
 
-      // 2. Emit to Socket.io server for immediate delivery to receiver
+      // 2. Deliver via socket if connected, or persist via REST API fallback for serverless
       const activeSock = socket || socketRef.current;
-      if (activeSock) {
+      if (activeSock && activeSock.connected) {
         activeSock.emit('send-direct-message', {
           sender: senderId,
           receiver: targetId,
@@ -347,6 +348,20 @@ const ChatList = () => {
           type: type,
           image: type === 'image' ? textToSend : null,
           sticker: type === 'sticker' ? textToSend : null,
+        });
+      } else {
+        api.post('/api/messages', {
+          receiver: targetId,
+          text: textToSend,
+          type: type,
+          image: type === 'image' ? textToSend : null,
+          sticker: type === 'sticker' ? textToSend : null,
+        }).then((res) => {
+          if (res.data) {
+            setMessages((prev) => prev.map((m) => (m._id === tempId ? res.data : m)));
+          }
+        }).catch((err) => {
+          console.error('[ChatList] REST send error:', err);
         });
       }
 
@@ -359,18 +374,27 @@ const ChatList = () => {
     }
   };
 
+  // Delete message handler
+  const handleDeleteMessage = async (messageId) => {
+    if (!messageId) return;
+    try {
+      setMessages((prev) => prev.filter((m) => m._id !== messageId));
+      if (!messageId.startsWith('temp_')) {
+        await api.delete(`/api/messages/${messageId}`);
+      }
+    } catch (err) {
+      console.error('[ChatList] Delete message error:', err);
+    }
+  };
+
   // Send friend request to an unknown user directly from the chat view or search list
   const handleSendFriendRequest = async (targetUserId, e = null) => {
     if (e) e.stopPropagation();
     try {
-      await axios.post(
-        'http://localhost:5000/api/friends/request',
-        { userId: targetUserId },
-        { headers: { 'x-auth-token': user.token } }
-      );
+      await api.post('/api/friends/request', { userId: targetUserId });
       setSentRequests((prev) => ({ ...prev, [targetUserId]: true }));
     } catch (err) {
-      const msg = err.response?.data?.msg || 'Request already sent';
+      const msg = getErrorMessage(err, 'Request already sent');
       setSentRequests((prev) => ({ ...prev, [targetUserId]: true }));
       console.log(msg);
     }
@@ -1045,13 +1069,39 @@ const ChatList = () => {
                         fontSize: '0.72rem',
                         color: 'var(--text-secondary)',
                         marginTop: '0.25rem',
-                        textAlign: isMe ? 'right' : 'left',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: isMe ? 'flex-end' : 'flex-start',
+                        gap: '0.4rem',
                         padding: '0 4px',
                       }}
                     >
-                      {msg.createdAt
-                        ? new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-                        : 'Just now'}
+                      <span>
+                        {msg.createdAt
+                          ? new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                          : 'Just now'}
+                      </span>
+                      {isMe && msg._id && !msg._id.toString().startsWith('temp_') && (
+                        <button
+                          onClick={() => handleDeleteMessage(msg._id)}
+                          style={{
+                            background: 'transparent',
+                            border: 'none',
+                            color: 'var(--text-secondary)',
+                            cursor: 'pointer',
+                            padding: '0 2px',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            opacity: 0.6,
+                            transition: 'opacity 0.2s',
+                          }}
+                          onMouseEnter={(e) => (e.currentTarget.style.opacity = '1')}
+                          onMouseLeave={(e) => (e.currentTarget.style.opacity = '0.6')}
+                          title="Delete message"
+                        >
+                          <Trash2 size={12} style={{ color: '#ef4444' }} />
+                        </button>
+                      )}
                     </div>
                   </div>
                 );
